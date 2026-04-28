@@ -138,7 +138,26 @@ def is_ucpath(row):
         ]
     ).lower()
 
-    return "ucpath" in text or "ucphrprd" in text
+    # Exclude common "not impacted" phrases before classifying as UCPath
+    no_impact_patterns = [
+        r"\bno\s+impact\s+to\s+uc\s*path\b",
+        r"\bno\s+impact\s+to\s+ucpath\b",
+        r"\bno\s+uc\s*path\s+impact\b",
+        r"\bno\s+ucpath\s+impact\b",
+        r"\bnot\s+impacting\s+uc\s*path\b",
+        r"\bnot\s+impacting\s+ucpath\b",
+        r"\bdoes\s+not\s+impact\s+uc\s*path\b",
+        r"\bdoes\s+not\s+impact\s+ucpath\b",
+        r"\bwill\s+not\s+impact\s+uc\s*path\b",
+        r"\bwill\s+not\s+impact\s+ucpath\b",
+        r"\buc\s*path\s+not\s+impacted\b",
+        r"\bucpath\s+not\s+impacted\b",
+    ]
+
+    if any(re.search(pattern, text) for pattern in no_impact_patterns):
+        return False
+
+    return bool(re.search(r"\buc\s*path\b|\bucpath\b|\bucphrprd\b", text))
 
 def is_ucpath_maintenance_window(row):
     if not row.get("ucpath", False):
@@ -159,6 +178,11 @@ def is_ucpath_maintenance_window(row):
 
     # Must fall entirely within Sunday 12:00 AM to 6:00 AM
     return start_minutes >= 0 and end_minutes <= 360 and end.date() == start.date()
+
+def rtf_highlight_par(text="", bold=True, size=24, highlight_color=1):
+    b1 = r"\b " if bold else ""
+    b0 = r"\b0 " if bold else ""
+    return rf"\pard \fs{size} \highlight{highlight_color} {b1}{rtf_escape(text)}{b0}\highlight0 \par"
 
 def fmt_ucpath_maintenance_heading(dt):
     return dt.strftime("UCPath Production Maintenance Window (Sunday, %m/%d/%y, 12:00 AM to 6:00 AM)")
@@ -417,18 +441,18 @@ def rtf_par(text="", bold=False, size=22, indent=False):
 def build_item_rtf(row):
     change_id = re.sub(r"\*+", "", str(row["Change_ID"])).strip()
     desc = str(row["Short Description"]).strip()
+
     suffix = pending_approval_suffix(row["State"])
 
     window = fmt_window(row["start_dt"], row["end_dt"])
     downtime = fmt_downtime(row.get("Downtime", ""))
     requestor = fmt_requestor(row.get("Requested By", ""))
 
-    main = f"{change_id}: {desc}{suffix}"
-    rest = f" — {window}. {downtime} {requestor}"
+    main = f"{change_id}: {desc}"
+    rest = f"{suffix} — {window}. {downtime} {requestor}"
 
     return (
-        r"\pard \li360\fi-180 \fs22 "
-        r"\bullet "
+        r"\pard \fs22 "
         r"\b " + rtf_escape(main) + r"\b0 "
         + rtf_escape(rest) +
         r"\par"
@@ -438,26 +462,45 @@ def build_item_rtf(row):
 def build_ucpath_maintenance_item_rtf(row):
     change_id = re.sub(r"\*+", "", str(row["Change_ID"])).strip()
     desc = str(row["Short Description"]).strip()
+
     suffix = pending_approval_suffix(row["State"])
     requestor = fmt_requestor_more_info(row.get("Requested By", ""))
 
-    line = f"• {change_id}: {desc}{suffix} — {requestor}"
-    return rtf_par(line, size=22, indent=True)
+    main = f"{change_id}: {desc}"
+    rest = f"{suffix} — {requestor}"
+
+    return (
+        r"\pard \fs22 "
+        r"\b " + rtf_escape(main) + r"\b0 "
+        + rtf_escape(rest) +
+        r"\par"
+    )
 
 def build_rtf(prod):
     parts = [
         r"{\rtf1\ansi\deff0",
         r"{\fonttbl{\f0 Calibri;}}",
+        r"{\colortbl ;\red255\green255\blue0;}",
         r"\f0",
         rtf_par("RFC Highlights:", bold=True, size=28),
         rtf_par("")
     ]
 
-    non_uc = prod[~prod["ucpath"]].copy()
-    if not non_uc.empty:
-        for group_name, grp in non_uc.groupby("Change Owner Group", dropna=False):
+    prod = prod.copy()
+    prod["ucpath_maint"] = prod.apply(is_ucpath_maintenance_window, axis=1)
+
+    # 1. Normal changes, including UCPath changes outside the Sunday maintenance window
+    normal = prod[~prod["ucpath_maint"]].copy()
+
+    if not normal.empty:
+        for group_name, grp in normal.groupby("Change Owner Group", dropna=False):
             heading = str(group_name).strip() if str(group_name).strip() else "Other"
-            parts.append(rtf_par(heading, bold=True, size=24))
+
+            # Highlight group heading if any changes in this owner group are UCPath-related
+            if grp["ucpath"].any():
+                parts.append(rtf_highlight_par(heading, bold=True, size=24))
+            else:
+                parts.append(rtf_par(heading, bold=True, size=24))
 
             grp = grp.sort_values(["start_dt", "Change_ID"])
             for _, row in grp.iterrows():
@@ -465,32 +508,25 @@ def build_rtf(prod):
 
             parts.append(rtf_par(""))
 
-    uc = prod[prod["ucpath"]].copy()
-    if not uc.empty:
-        uc = uc.copy()
-        uc["ucpath_maint"] = uc.apply(is_ucpath_maintenance_window, axis=1)
+    # 2. UCPath Sunday maintenance window changes
+    uc_maint = prod[prod["ucpath_maint"]].copy()
 
-        uc_maint = uc[uc["ucpath_maint"]].copy()
-        uc_other = uc[~uc["ucpath_maint"]].copy()
+    if not uc_maint.empty:
+        first_dt = uc_maint.sort_values(["start_dt"]).iloc[0]["start_dt"]
 
-        if not uc_maint.empty:
-            first_dt = uc_maint.sort_values(["start_dt"]).iloc[0]["start_dt"]
-            parts.append(rtf_par(fmt_ucpath_maintenance_heading(first_dt), bold=True, size=24))
+        parts.append(
+            rtf_highlight_par(
+                fmt_ucpath_maintenance_heading(first_dt),
+                bold=True,
+                size=24
+            )
+        )
 
-            uc_maint = uc_maint.sort_values(["start_dt", "Change_ID"])
-            for _, row in uc_maint.iterrows():
-                parts.append(build_ucpath_maintenance_item_rtf(row))
+        uc_maint = uc_maint.sort_values(["start_dt", "Change_ID"])
+        for _, row in uc_maint.iterrows():
+            parts.append(build_ucpath_maintenance_item_rtf(row))
 
-            parts.append(rtf_par(""))
-
-        if not uc_other.empty:
-            parts.append(rtf_par("UCPath", bold=True, size=24))
-
-            uc_other = uc_other.sort_values(["start_dt", "Change_ID"])
-            for _, row in uc_other.iterrows():
-                parts.append(build_item_rtf(row))
-
-            parts.append(rtf_par(""))
+        parts.append(rtf_par(""))
 
     parts.append("}")
     return "\n".join(parts)
