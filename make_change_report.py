@@ -128,6 +128,27 @@ def classify_environment(env):
     return "non_production"
 
 
+def has_ucpath_impact(text):
+    text = str(text or "").lower()
+
+    negative_phrases = [
+        "no impact to ucpath",
+        "no ucpath impact",
+        "no impact on ucpath",
+        "does not impact ucpath",
+        "will not impact ucpath",
+        "no uc path impact",
+        "no impact to uc path",
+        "no impact to ucphr",
+        "no impact to ucphrprd",
+    ]
+
+    if any(phrase in text for phrase in negative_phrases):
+        return False
+
+    return "ucpath" in text or "uc path" in text or "ucphrprd" in text
+
+
 def is_ucpath(row):
     text = " ".join(
         [
@@ -136,28 +157,9 @@ def is_ucpath(row):
             str(row.get("Configuration Item", "")),
             str(row.get("Description", "")),
         ]
-    ).lower()
+    )
 
-    # Exclude common "not impacted" phrases before classifying as UCPath
-    no_impact_patterns = [
-        r"\bno\s+impact\s+to\s+uc\s*path\b",
-        r"\bno\s+impact\s+to\s+ucpath\b",
-        r"\bno\s+uc\s*path\s+impact\b",
-        r"\bno\s+ucpath\s+impact\b",
-        r"\bnot\s+impacting\s+uc\s*path\b",
-        r"\bnot\s+impacting\s+ucpath\b",
-        r"\bdoes\s+not\s+impact\s+uc\s*path\b",
-        r"\bdoes\s+not\s+impact\s+ucpath\b",
-        r"\bwill\s+not\s+impact\s+uc\s*path\b",
-        r"\bwill\s+not\s+impact\s+ucpath\b",
-        r"\buc\s*path\s+not\s+impacted\b",
-        r"\bucpath\s+not\s+impacted\b",
-    ]
-
-    if any(re.search(pattern, text) for pattern in no_impact_patterns):
-        return False
-
-    return bool(re.search(r"\buc\s*path\b|\bucpath\b|\bucphrprd\b", text))
+    return has_ucpath_impact(text)
 
 def is_ucpath_maintenance_window(row):
     if not row.get("ucpath", False):
@@ -178,11 +180,6 @@ def is_ucpath_maintenance_window(row):
 
     # Must fall entirely within Sunday 12:00 AM to 6:00 AM
     return start_minutes >= 0 and end_minutes <= 360 and end.date() == start.date()
-
-def rtf_highlight_par(text="", bold=True, size=24, highlight_color=1):
-    b1 = r"\b " if bold else ""
-    b0 = r"\b0 " if bold else ""
-    return rf"\pard \fs{size} \highlight{highlight_color} {b1}{rtf_escape(text)}{b0}\highlight0 \par"
 
 def fmt_ucpath_maintenance_heading(dt):
     return dt.strftime("UCPath Production Maintenance Window (Sunday, %m/%d/%y, 12:00 AM to 6:00 AM)")
@@ -426,7 +423,6 @@ def rtf_escape(s):
          .replace("{", r"\{")
          .replace("}", r"\}")
          .replace("—", r"\emdash ")
-         .replace("•", r"\bullet ")
     )
 
 
@@ -441,7 +437,6 @@ def rtf_par(text="", bold=False, size=22, indent=False):
 def build_item_rtf(row):
     change_id = re.sub(r"\*+", "", str(row["Change_ID"])).strip()
     desc = str(row["Short Description"]).strip()
-
     suffix = pending_approval_suffix(row["State"])
 
     window = fmt_window(row["start_dt"], row["end_dt"])
@@ -462,7 +457,6 @@ def build_item_rtf(row):
 def build_ucpath_maintenance_item_rtf(row):
     change_id = re.sub(r"\*+", "", str(row["Change_ID"])).strip()
     desc = str(row["Short Description"]).strip()
-
     suffix = pending_approval_suffix(row["State"])
     requestor = fmt_requestor_more_info(row.get("Requested By", ""))
 
@@ -474,6 +468,16 @@ def build_ucpath_maintenance_item_rtf(row):
         r"\b " + rtf_escape(main) + r"\b0 "
         + rtf_escape(rest) +
         r"\par"
+    )
+
+def rtf_highlight_par(text="", bold=True, size=24, highlight_color=1):
+    b1 = r"\b " if bold else ""
+    b0 = r"\b0 " if bold else ""
+    return (
+        rf"\pard \fs{size} "
+        rf"\highlight{highlight_color} "
+        f"{b1}{rtf_escape(text)}{b0}"
+        r"\highlight0 \par"
     )
 
 def build_rtf(prod):
@@ -489,43 +493,47 @@ def build_rtf(prod):
     prod = prod.copy()
     prod["ucpath_maint"] = prod.apply(is_ucpath_maintenance_window, axis=1)
 
-    # 1. Normal changes, including UCPath changes outside the Sunday maintenance window
+    sections = []
+
+    # Normal owner-group sections.
+    # This includes UCPath-related changes that are NOT in the Sunday maintenance window.
     normal = prod[~prod["ucpath_maint"]].copy()
 
     if not normal.empty:
         for group_name, grp in normal.groupby("Change Owner Group", dropna=False):
             heading = str(group_name).strip() if str(group_name).strip() else "Other"
 
-            # Highlight group heading if any changes in this owner group are UCPath-related
-            if grp["ucpath"].any():
-                parts.append(rtf_highlight_par(heading, bold=True, size=24))
-            else:
-                parts.append(rtf_par(heading, bold=True, size=24))
+            highlight = grp["ucpath"].any()
 
-            grp = grp.sort_values(["start_dt", "Change_ID"])
-            for _, row in grp.iterrows():
-                parts.append(build_item_rtf(row))
+            items = [
+                build_item_rtf(row)
+                for _, row in grp.sort_values(["start_dt", "Change_ID"]).iterrows()
+            ]
 
-            parts.append(rtf_par(""))
+            sections.append((heading.lower(), heading, highlight, items))
 
-    # 2. UCPath Sunday maintenance window changes
+    # UCPath Sunday maintenance window section.
     uc_maint = prod[prod["ucpath_maint"]].copy()
 
     if not uc_maint.empty:
         first_dt = uc_maint.sort_values(["start_dt"]).iloc[0]["start_dt"]
+        heading = fmt_ucpath_maintenance_heading(first_dt)
 
-        parts.append(
-            rtf_highlight_par(
-                fmt_ucpath_maintenance_heading(first_dt),
-                bold=True,
-                size=24
-            )
-        )
+        items = [
+            build_ucpath_maintenance_item_rtf(row)
+            for _, row in uc_maint.sort_values(["start_dt", "Change_ID"]).iterrows()
+        ]
 
-        uc_maint = uc_maint.sort_values(["start_dt", "Change_ID"])
-        for _, row in uc_maint.iterrows():
-            parts.append(build_ucpath_maintenance_item_rtf(row))
+        sections.append((heading.lower(), heading, True, items))
 
+    # Render all sections alphabetically by heading.
+    for _, heading, highlight, items in sorted(sections, key=lambda x: x[0]):
+        if highlight:
+            parts.append(rtf_highlight_par(heading, bold=True, size=24))
+        else:
+            parts.append(rtf_par(heading, bold=True, size=24))
+
+        parts.extend(items)
         parts.append(rtf_par(""))
 
     parts.append("}")
