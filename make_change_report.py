@@ -7,6 +7,51 @@ from pathlib import Path
 
 import pandas as pd
 
+SHAREPOINT_BASE = "https://ucofficeofthepresident.sharepoint.com/sites/its/cm/Shared%20Documents"
+
+def load_footer_rtf(path):
+    if not path:
+        return ""
+
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+
+    start = text.find(r"\pard")
+    end = text.rfind("}")
+
+    if start == -1 or end == -1 or end <= start:
+        return ""
+
+    return text[start:end].strip()
+
+def sharepoint_pdf_url(filename):
+    return f"{SHAREPOINT_BASE}/{filename.replace(' ', '%20')}"
+
+def fmt_report_date(dt):
+    return dt.strftime("%m-%d-%y")
+
+def report_links(cab_date):
+    cab_date = pd.to_datetime(cab_date)
+
+    post_cab_date = fmt_report_date(cab_date)
+
+    range_end = cab_date - pd.Timedelta(days=3)
+    range_start = range_end - pd.Timedelta(days=6)
+
+    range_text = f"{fmt_report_date(range_start)} to {fmt_report_date(range_end)}"
+
+    return {
+        "post_cab_label": f"{post_cab_date} Post CAB Report",
+        "post_cab_url": sharepoint_pdf_url(f"{post_cab_date} Post CAB Report.pdf"),
+
+        "pir_label": "PIR Weekly Report",
+        "pir_url": sharepoint_pdf_url(f"Weekly PIR Report {range_text}.pdf"),
+
+        "pir_standard_label": "PIR Weekly Report - Standard Changes",
+        "pir_standard_url": sharepoint_pdf_url(f"Weekly PIR Report - Standard Changes {range_text}.pdf"),
+
+        "rca_label": "Weekly Problem RCAs",
+        "rca_url": sharepoint_pdf_url(f"Weekly Problem RCAs {range_text}.pdf"),
+    }
 
 def normalize_columns(cols):
     out = []
@@ -38,7 +83,11 @@ def parse_dt(series):
     Parse mixed datetime strings from Tableau export.
     """
     s = series.astype(str).str.strip()
-    return pd.to_datetime(s, errors="coerce")
+    return pd.to_datetime(
+    s,
+    format="%m/%d/%y  %I:%M %p",
+    errors="coerce"
+)
 
 
 def load_raw_changes(path):
@@ -254,6 +303,18 @@ def pending_approval_suffix(state):
         return " {Pending Approval}"
     return ""
 
+def fmt_requestor_more_info(val):
+    s = "" if pd.isna(val) else str(val).strip()
+    if not s:
+        return "Please contact the requestor for more information."
+    return f"Please contact {s} for more information."
+
+"""
+**********************************************
+**************** Build HTML ******************
+**********************************************
+"""
+
 def build_ucpath_maintenance_item_html(row):
     change_id_raw = str(row["Change_ID"])
     change_id_clean = re.sub(r"\*+", "", change_id_raw)
@@ -270,12 +331,6 @@ def build_ucpath_maintenance_item_html(row):
         f"<b>{change_id}: {desc}</b>{suffix} &mdash; {requestor}"
         "</div>"
     )
-
-def fmt_requestor_more_info(val):
-    s = "" if pd.isna(val) else str(val).strip()
-    if not s:
-        return "Please contact the requestor for more information."
-    return f"Please contact {s} for more information."
 
 def build_item_html(row):
     change_id_raw = str(row["Change_ID"])
@@ -298,8 +353,21 @@ def build_item_html(row):
         "</div>"
     )
 
+def build_report_links_html(cab_date):
+    links = report_links(cab_date)
 
-def build_html(prod):
+    return (
+        "<div style='font-family:Calibri, Arial, sans-serif; font-size:11pt; margin-top:12px;'>"
+        "The "
+        f'<a href="{html.escape(links["post_cab_url"])}">{html.escape(links["post_cab_label"])}</a>, '
+        f'<a href="{html.escape(links["pir_url"])}">{html.escape(links["pir_label"])}</a>, '
+        f'<a href="{html.escape(links["pir_standard_url"])}">{html.escape(links["pir_standard_label"])}</a>, '
+        f'and <a href="{html.escape(links["rca_url"])}">{html.escape(links["rca_label"])}</a> '
+        "are available in our Change Management SharePoint site."
+        "</div>"
+    )
+
+def build_html(prod, cab_date):
     parts = [
         "<html>",
         "<head><meta charset='UTF-8'></head>",
@@ -354,9 +422,15 @@ def build_html(prod):
             uc_other = uc_other.sort_values(["start_dt", "Change_ID"])
             for _, row in uc_other.iterrows():
                 parts.append(build_item_html(row))
-
+    parts.append(build_report_links_html(cab_date))           
     parts.append("</body></html>")
     return "\n".join(parts)
+
+"""
+**********************************************
+******** Build Plain Text Section ************
+**********************************************
+"""
 
 def build_item_text(row):
     change_id = re.sub(r"\*+", "", str(row["Change_ID"])).strip()
@@ -377,7 +451,20 @@ def build_ucpath_maintenance_item_text(row):
 
     return f"  • {change_id}: {desc}{suffix} — {requestor}"
 
-def build_text(prod):
+def build_report_links_text(cab_date):
+    links = report_links(cab_date)
+
+    return (
+        f'{links["post_cab_label"]}, {links["pir_label"]}, '
+        f'{links["pir_standard_label"]}, and {links["rca_label"]} are available '
+        f'in our Change Management SharePoint site.\n\n'
+        f'{links["post_cab_label"]}: {links["post_cab_url"]}\n'
+        f'{links["pir_label"]}: {links["pir_url"]}\n'
+        f'{links["pir_standard_label"]}: {links["pir_standard_url"]}\n'
+        f'{links["rca_label"]}: {links["rca_url"]}'
+    )
+
+def build_text(prod, cab_date):
     lines = []
     lines.append("RFC Highlights:")
     lines.append("")
@@ -414,8 +501,16 @@ def build_text(prod):
             for _, row in uc_other.iterrows():
                 lines.append(build_item_text(row))
             lines.append("")
-
+            
+    lines.append(build_report_links_text(cab_date)) 
     return "\n".join(lines).rstrip() + "\n"
+
+"""
+**********************************************
+************ Build RTF Section ***************
+**********************************************
+"""
+
 def rtf_escape(s):
     s = "" if pd.isna(s) else str(s)
     return (
@@ -424,7 +519,6 @@ def rtf_escape(s):
          .replace("}", r"\}")
          .replace("—", r"\emdash ")
     )
-
 
 def rtf_par(text="", bold=False, size=22, indent=False):
     # RTF font sizes are half-points: 22 = 11pt, 24 = 12pt, 28 = 14pt
@@ -480,7 +574,40 @@ def rtf_highlight_par(text="", bold=True, size=24, highlight_color=1):
         r"\highlight0 \par"
     )
 
-def build_rtf(prod):
+def rtf_hyperlink(label, url):
+    return (
+        r'{\field{\*\fldinst HYPERLINK "' + rtf_escape(url) + r'"}'
+        r'{\fldrslt ' + rtf_escape(label) + r'}}'
+    )
+
+def build_report_links_rtf(cab_date):
+    links = report_links(cab_date)
+
+    return (
+        r"\pard \fs22 "
+        + rtf_escape("The ")
+        + rtf_hyperlink(links["post_cab_label"], links["post_cab_url"])
+        + rtf_escape(", ")
+        + rtf_hyperlink(links["pir_label"], links["pir_url"])
+        + rtf_escape(", ")
+        + rtf_hyperlink(links["pir_standard_label"], links["pir_standard_url"])
+        + rtf_escape(", and ")
+        + rtf_hyperlink(links["rca_label"], links["rca_url"])
+        + rtf_escape(" are available in our Change Management SharePoint site.")
+        + r"\par"
+    )
+
+def build_ucpath_impact_note_rtf():
+    return (
+        r"\pard \fs22 "
+        r"\i "  # italic on
+        r"\highlight1 " + rtf_escape("*UCPath Impact") + r"\highlight0 "  # yellow highlight
+        + rtf_escape(" — Highlighted items denote changes related to/ or may have potential impact to UCPath")
+        + r"\i0 "  # italic off
+        r"\par"
+    )
+
+def build_rtf(prod, cab_date, footer_rtf_path=None):
     parts = [
         r"{\rtf1\ansi\deff0",
         r"{\fonttbl{\f0 Calibri;}}",
@@ -535,9 +662,31 @@ def build_rtf(prod):
 
         parts.extend(items)
         parts.append(rtf_par(""))
+    parts.append(rtf_par(""))
+    parts.append(build_ucpath_impact_note_rtf())
+    parts.append(rtf_par(""))
+    parts.append(build_report_links_rtf(cab_date))
+    parts.append(rtf_par(""))
+    footer_rtf = load_footer_rtf(footer_rtf_path)
+    #debgging code below
+    #print(footer_rtf[:500])
 
+    if footer_rtf:
+        parts.append(rtf_par(""))
+        parts.append(footer_rtf)
+    
     parts.append("}")
+    print("footer_rtf_path:", footer_rtf_path)
+    print("footer_rtf length:", len(footer_rtf) if footer_rtf else 0)
     return "\n".join(parts)
+
+
+"""
+**********************************************
+*************** Build Report *****************
+**********************************************
+"""
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -547,10 +696,13 @@ def main():
     parser.add_argument("--output-review", default="manual_review.txt")
     parser.add_argument("--output-text", default=None, help="Optional plain-text output file")
     parser.add_argument("--output-rtf", default=None, help="Optional RTF output file")
+    parser.add_argument("--footer-rtf", default=None)
     args = parser.parse_args()
 
     cab_date = pd.to_datetime(args.cab_date)
     df = load_raw_changes(args.input)
+    print(df[["Change_ID", "Start Date", "End Date", "start_dt"]].head(20))
+    print(df.columns.tolist())
 
     df["env_class"] = df["Environments Impacted"].apply(classify_environment)
     df["ucpath"] = df.apply(is_ucpath, axis=1)
@@ -568,24 +720,27 @@ def main():
         (prod["start_dt"] < report_cutoff)
     ].copy()
 
+    print("df rows:", len(df))
+    print("prod rows:", len(prod))
+    print(df[["Change_ID", "Short Description", "Environments Impacted", "env_class", "start_dt"]].head(20))
+
     # Output files
-    html_content = build_html(prod)
+    html_content = build_html(prod, cab_date)
     if args.output_html:
         Path(args.output_html).write_text(html_content, encoding="utf-8")
 
     if args.output_text:
-        text_content = build_text(prod)
+        text_content = build_text(prod, cab_date)
         Path(args.output_text).write_text(text_content, encoding="utf-8")
 
     if args.output_review:
         Path(args.output_review).write_text(review.to_string(index=False), encoding="utf-8")
 
     if args.output_rtf:
-        rtf_content = build_rtf(prod)
+        rtf_content = build_rtf(prod, cab_date, args.footer_rtf)
         Path(args.output_rtf).write_text(rtf_content, encoding="utf-8")
         
     print("Done")
-
 
 if __name__ == "__main__":
     main()
