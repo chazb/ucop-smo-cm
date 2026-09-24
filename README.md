@@ -2,7 +2,7 @@
 
 ## Overview
 
-This utility generates a formatted HTML report for weekly CAB (Change Advisory Board) communications using data exported from Tableau.
+This utility generates a formatted report for weekly CAB (Change Advisory Board) communications using data exported from Tableau.
 
 The goal is to reduce manual effort, improve consistency, and standardize formatting for CAB email summaries, while still allowing for required manual review and judgment (e.g., UCPath impact).
 
@@ -12,11 +12,11 @@ The goal is to reduce manual effort, improve consistency, and standardize format
 
 * Parses Tableau-exported Excel data
 * Filters for relevant Production changes within the CAB window
-* Groups changes by assignment group
-* Formats output into Outlook-compatible HTML
+* Groups changes by change owner
+* Formats output into Outlook-compatible format (RTF and HTML support)
 * Produces:
 
-  * A ready-to-paste HTML email body
+  * A ready-to-copy-and-paste email body
   * A manual review file for edge cases (e.g., missing environment data)
 
 ---
@@ -43,9 +43,9 @@ The script automatically detects headers but expects fields such as:
 
 ## Outputs
 
-### 1. HTML Email Body
+### 1. Email Body
 
-`weekly_change_email.html`
+`weekly_change_email.<format>`
 
 * Outlook-compatible formatting
 * Grouped by assignment group
@@ -73,7 +73,7 @@ The script automatically detects headers but expects fields such as:
 python make_change_report.py \
   --input "<path to Excel file>" \
   --cab-date YYYY-MM-DD \
-  --output-html weekly_change_email.html \
+  --output-html weekly_change_email.<rtf,html> \
   --output-review manual_review.txt
 ```
 
@@ -89,39 +89,37 @@ python make_change_report.py \
 
 ## Workflow
 
-1. Export CAB data from Tableau
-2. Run the script using the exported file
-3. Open `weekly_change_email.html`
-4. Copy and paste into Outlook email
+1. Export CAB data from Tableau using Excel/Crosstab option and format.
+2. Run the script using the exported file.
+3. Open the output file.
+4. Copy and paste into Outlook email (use web-based OWA for the most consistent results)
 5. Perform manual review:
 
    * Highlight UCPath-related changes (identified during CAB)
    * Validate any entries in `manual_review.txt`
-6. Send finalized CAB communication
+6. Send finalized CAB communication/draft
 
 ---
 
 ## Key Formatting Rules
 
-* Change ID and description are bolded
-* "{Pending Approval}" is not bolded
+* Bullets and use of bold and highlighted fonts is not consistent between your HTML/RTF viewer and OWA.  Review and adjust as necessary.
 * Change window uses readable format:
 
-  * Example: `Sat., 4/11 10:00 PM to 6:00 AM`
+  * Example: `Sat., 4/11 10:00 PM to Sun., 4/12 6:00 AM`
 * Downtime is humanized:
 
   * "There will be no downtime"
   * "There will be 20 minutes of downtime"
   * "There will be 1 hour and 30 minutes of downtime"
-* Uses Outlook-safe HTML (no Markdown, minimal styling)
+* Uses Outlook-safe RTF/HTML (no Markdown, minimal styling)
 
 ---
 
 ## Known Limitations
 
 * UCPath impact is not programmatically determined
-
-  * Must be identified and highlighted manually after CAB
+* Must be identified and highlighted manually after CAB
 * Requires Tableau export (no direct ServiceNow integration)
 * Assumes relatively consistent export structure
 * Designed for Outlook desktop compatibility (Windows + Mac)
@@ -134,7 +132,7 @@ python make_change_report.py \
 * pandas
 * openpyxl
 
-Install dependencies:
+How to Install Python 3 dependencies:
 
 ```bash
 pip install pandas openpyxl
